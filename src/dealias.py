@@ -17,6 +17,7 @@ Delivered to the U.S. Government with Unlimited Rights, as defined in DFARS Part
 
 import tensorflow as tf
 from packaging import version
+import time as pytime
 
 class VelocityDealiaser(tf.keras.Model):
     """
@@ -40,6 +41,7 @@ class VelocityDealiaser(tf.keras.Model):
             self.optimizer = tf.keras.optimizers.legacy.Adam()
         else:
             self.optimizer = tf.keras.optimizers.Adam()
+    @tf.function
     def call(self, inputs):
         """
         Inputs is a dict:
@@ -54,34 +56,35 @@ class VelocityDealiaser(tf.keras.Model):
         vel_in=inputs['vel']
 
         # Normalize velocity by nyquist
-        shp_inputs=tf.shape(vel_in) # [N,n_f,L,W,1]
-        nyq_tiled=tf.tile(nyq[:,:,:,None,None],
-                     (1,1,shp_inputs[2],shp_inputs[3],shp_inputs[4])) #[N,n_f,L,W,1]
+        if vel_in.shape != nyq.shape:
+            shp_inputs=tf.shape(vel_in) # [N,n_f,L,W,1]
+            nyq=tf.tile(nyq[:,:,:,None,None],
+                          (1,1,shp_inputs[2],shp_inputs[3],shp_inputs[4])) #[N,n_f,L,W,1]
         
-        vel = vel_in / nyq_tiled #[N,n_f,L,W,1]
+        vel = vel_in / nyq #[N,n_f,L,W,1]
         vel,bad_mask=make_velocity_mask(vel,
                          fill_val=tf.cast(-3.0,vel.dtype)) 
-
         # run feature extraction
         x=tf.transpose(vel,(0,2,3,1,4))
         xshp = tf.shape(x)
         x=tf.reshape(x,(xshp[0],xshp[1],xshp[2],xshp[3]*xshp[4]))
 
-        f=self.extractor(x) 
+        f=self.extractor(x)
         out=self.upsampler(f) # [N,L,W,6] one-hot pred
         out=tf.clip_by_value(out,-50.0,50.0) # improved training stability
         
         # Dealias velocity
         # take last frame only
         vel_in = vel_in[:,-1] # [batch,L,W,1]
-        nyq_tiled = nyq_tiled[:,-1] # [batch,L,W,1]
-        vel_pred = self.dealias_vel(vel_in,out,nyq_tiled)
-
+        nyq = nyq[:,-1] # [batch,L,W,1]
+        vel_pred = self.dealias_vel(vel_in,out,nyq)
+            
         out = tf.cast(out,tf.float32)
         vel_pred=tf.cast(vel_pred,tf.float32)
-
+        # print(vel_pred)
+        
         return {'alias_mask':out,'dealiased_vel':vel_pred}
-            
+    @tf.function        
     def dealias_vel(self,vel,alias_onehot,nyq):
         """
         Uses nyquist velocity and output of segmentation model to correct aliased regions
@@ -98,11 +101,10 @@ class VelocityDealiaser(tf.keras.Model):
         vel=self.apply_correction(cat==4,vel, 2*nyq)
         vel=self.apply_correction(cat==5,vel, 4*nyq)
         return vel
-
+    @tf.function
     def apply_correction(self,mask,vel,correction):
         vel=tf.where(mask,vel+correction,vel)
         return vel 
-
 
 
 
@@ -117,9 +119,3 @@ def make_velocity_mask(vel,fill_val=0):
     bad_mask = tf.math.is_nan(vel)
     vel = tf.where(bad_mask,fill_val,vel)
     return vel,bad_mask
-
-
-
-
-
-
