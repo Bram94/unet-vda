@@ -7,7 +7,13 @@ Created on Wed Aug 16 16:22:17 2023
 import os
 import pickle
 import numpy as np
+import time as pytime
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from matplotlib import cm
+import matplotlib.ticker as ticker
 
+from src.plotting import create_polar_plot, add_cbar
 from unet_vda import Unet_VDA
 vda = Unet_VDA()
 
@@ -33,4 +39,33 @@ diffs = diffs[:n_azi-1][::-1]
 da_median = np.median(diffs)
 da = diffs[diffs < 3*da_median].mean()
 
+t = pytime.time()
 data_new = vda(data, vn, azis, da)
+print(pytime.time()-t, '')
+
+
+#%%
+# Set Colormap
+cmap=cm.get_cmap('seismic')
+cmap.set_under([.9,.9,.9])
+cmap.set_bad([.9,.9,.9])
+cmap.set_over([.9,.9,.9])
+norm=mpl.colors.Normalize(vmin=-70, vmax=70)  
+
+a=1
+fig,axs=plt.subplots(1,2,figsize=(15*a,5*a))
+im,_ = create_polar_plot(axs[0], data,cmap,norm,0.5,annotate=False)
+im,_ = create_polar_plot(axs[1], data_new,cmap,norm,0.5,annotate=False)
+add_cbar(fig,axs[1],im,'m/s')
+
+for k,ax in enumerate(axs):
+        ticks_x = ticker.FuncFormatter(lambda x, pos: '{0:g}'.format(x/1000))
+        ax.xaxis.set_major_formatter(ticks_x)
+        ticks_y = ticker.FuncFormatter(lambda x, pos: '{0:g}'.format(x/1000))
+        ax.yaxis.set_major_formatter(ticks_y)
+        ax.set_xlabel('km')
+axs[0].set_ylabel('km')
+axs[0].set_title('Level 2 Velocity (Aliased)')
+axs[1].set_title('U-Net Result')
+
+plt.tight_layout()

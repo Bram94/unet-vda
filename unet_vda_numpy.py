@@ -26,10 +26,6 @@ def angle_diff(angle1, angle2=None, between_0_360=False):
 
 
 class Unet_VDA():
-    def __init__(self):
-        self.run_only_once_for_da_gt_1 = True
-        self.n_rads = []
-        
     
     def load_model(self):
         start_neurons_az = 16 # sn=16
@@ -44,7 +40,11 @@ class Unet_VDA():
         self.vda = VelocityDealiaser(down, up)
         
         # Load weights
-        self.vda.load_weights('models/dealias_sn16_csi9764.SavedModel')
+        self.vda.load_weights('D:/NLradar/Python_files/dealiasing/unet_vda/models/dealias_sn16_csi9764.SavedModel')
+        
+        self.run_only_once_for_da_gt_1 = True
+        
+        self.n_rads = []
 
 
     def __call__(self, data, vn, azis=None, da=None, limit_shape_changes=False):
@@ -83,15 +83,11 @@ class Unet_VDA():
             data, vn, indices = self.expand_data_to_360deg(data, vn, azis, da)
         
         vn_unique = np.unique(np.asarray(vn))
-        vn = vn_unique[0] if len(vn_unique) == 1 else np.tile(vn, (data.shape[1], 1)).T
-        
-        orig_n_rad = data.shape[1]
-        data, vn = self.expand_radial_dim_if_needed(data, vn)
-        data, vn = self.change_azimuthal_dim_if_needed(data, vn)
-        
-        data = self.prepare_and_run_model(data, vn).numpy()
-        
-        return self.restore_azimuthal_dim_if_needed(data, vn)[indices, :orig_n_rad]
+        if len(vn_unique) == 1:
+            return self.prepare_and_run_model(data, vn_unique[0])[indices]
+        else:
+            vn = np.tile(vn, (data.shape[1], 1)).T
+            return self.prepare_and_run_model(data, vn)[indices]
             
     def expand_data_to_360deg(self, data, vn, azis, da):
         n_azi, n_rad = data.shape
@@ -121,8 +117,71 @@ class Unet_VDA():
         
         return _data, _vn, indices
     
-    def expand_radial_dim_if_needed(self, data, vn):
+    def prepare_and_run_model(self, data, vn):        
+        """Note: the model has been trained on data with an azimuthal resolution of 1°, implying that input data needs to consist
+        of 360 azimuthal bins. If the actual number is different, then measures are needed.
+        """
         n_azi, n_rad = data.shape
+        
+        remap_data = n_azi%360 != 0
+        if remap_data:
+            orig_data, orig_n_azi = data, n_azi
+            n_azi = round(n_azi/360)*360
+            indices = (np.arange(0.5, n_azi)*orig_n_azi/n_azi).astype('uint16')
+            data = data[indices]
+            if type(vn) == np.ndarray:
+                orig_vn = vn
+                vn = vn[indices]
+        da = round(n_azi/360)
+        
+        self.data = np.empty(data.shape, data.dtype)
+        if da == 1:
+            self.data = self.run_unet_vda(data, vn)
+        elif self.run_only_once_for_da_gt_1:    
+            data_mask = np.isnan(data)
+            
+            phi = np.pi*data/vn
+            sin_phi, cos_phi = np.sin(phi), np.cos(phi)
+            sin_phi[data_mask] = cos_phi[data_mask] = 0.
+            def reshape(arr):
+                return arr.T.reshape((n_rad, n_azi//da, da)).transpose((1,0,2))
+            sin_phi_sum, cos_phi_sum = reshape(sin_phi).sum(axis=-1), reshape(cos_phi).sum(axis=-1)
+            phi_mean = np.arctan2(sin_phi_sum, cos_phi_sum)
+            
+            unmasked = reshape(~data_mask).astype('uint8').sum(axis=-1)
+            if type(vn) == np.ndarray:
+                vn[data_mask] = 0
+                vn_mean = reshape(vn).sum(axis=-1)/unmasked
+            else:
+                vn_mean = vn
+            v_mean = phi_mean*vn_mean/np.pi
+            v_mean[unmasked == 0] = np.nan
+            
+            dealiased_vel = self.run_unet_vda(v_mean, vn_mean)
+            
+            for i in range(da):
+                vn_ref = vn[i::da] if type(vn) == np.ndarray else vn 
+                n = np.round((dealiased_vel-data[i::da])/(2*vn_ref))
+                self.data[i::da] = data[i::da]+2*n*vn_ref
+        else:
+            for i in range(da):
+                self.data[i::da] = self.run_unet_vda(data[i::da], vn[i::da] if type(vn) == np.ndarray else vn)        
+                
+        if remap_data:
+            copy = self.data
+            self.data = np.empty((orig_n_azi, copy.shape[1]), copy.dtype)
+            self.data[indices] = copy
+            for i in range(orig_n_azi):
+                 if not i in indices:
+                     v_ref = 0.5*(self.data[i-1]+self.data[(i+1)%orig_n_azi])
+                     vn_ref = orig_vn[i] if type(vn) == np.ndarray else vn
+                     n = np.round((v_ref-orig_data[i])/(2*vn_ref))
+                     self.data[i] = orig_data[i]+2*n*vn_ref
+                
+        return self.data
+    
+    def run_unet_vda(self, vel, vn):
+        n_azi, n_rad = vel.shape
         
         # The number of radial bins needs to be an integer multiple of 64
         n = 64
@@ -132,105 +191,28 @@ class Unet_VDA():
             diffs = diffs[(diffs >= 0) & (diffs <= 256)]
             if len(diffs):
                 n_rad_extra = diffs.min()+n_rad_extra
-        data = np.concatenate([data, np.full((n_azi, n_rad_extra), np.nan, dtype=data.dtype)], axis=1)
-        if not data.shape[1] in self.n_rads:
-            self.n_rads.append(data.shape[1])
+        vel = np.concatenate([vel, np.full((n_azi, n_rad_extra), np.nan, dtype=vel.dtype)], axis=1)
+        if not vel.shape[1] in self.n_rads:
+            self.n_rads.append(vel.shape[1])
         
-        if type(vn) == np.ndarray:
-            # Assumes that the input shapes of data and vn are equal
-            vn = np.concatenate([vn, np.full((n_azi, n_rad_extra), np.nan, dtype=vn.dtype)], axis=1)
-        return data, vn 
-    
-    def change_azimuthal_dim_if_needed(self, data, vn):
-        n_azi = data.shape[0]
-        self.remap_data = n_azi%360 != 0
-        if self.remap_data:
-            self.orig_data, self.orig_n_azi = data, n_azi
-            n_azi = round(n_azi/360)*360
-            self.remap_indices = (np.arange(0.5, n_azi)*self.orig_n_azi/n_azi).astype('uint16')
-            data = data[self.remap_indices]
-            if type(vn) == np.ndarray:
-                self.orig_vn = vn
-                vn = vn[self.remap_indices]
-        return data, vn
-                
-    def restore_azimuthal_dim_if_needed(self, data, vn):   
-        if self.remap_data:
-            copy = data
-            data = np.empty((self.orig_n_azi, copy.shape[1]), copy.dtype)
-            data[self.remap_indices] = copy
-            for i in range(self.orig_n_azi):
-                 if not i in self.remap_indices:
-                     v_ref = 0.5*(data[i-1]+data[(i+1)%self.orig_n_azi])
-                     vn_ref = self.orig_vn[i] if type(vn) == np.ndarray else vn
-                     n = np.round((v_ref-self.orig_data[i])/(2*vn_ref))
-                     data[i] = self.orig_data[i]+2*n*vn_ref
-        return data
-    
-    @tf.function
-    def prepare_and_run_model(self, data, vn):        
-        """Note: the model has been trained on data with an azimuthal resolution of 1°, implying that input data needs to consist
-        of 360 azimuthal bins. If the actual number is different, then measures are needed.
-        """
-        n_azi, n_rad = data.shape        
-        na = round(n_azi/360)
-        
-        if na == 1:
-            self.data = self.run_unet_vda(data, vn)
-        elif self.run_only_once_for_da_gt_1:    
-            data_mask = tf.math.is_nan(data)
-            
-            phi = np.pi*data/vn
-            sin_phi = tf.where(data_mask, 0., tf.sin(phi))
-            cos_phi = tf.where(data_mask, 0., tf.cos(phi))
-            def reshape(arr):
-                return tf.transpose(tf.reshape(tf.transpose(arr), (n_rad, n_azi//na, na)), (1,0,2))
-            sin_phi_sum = tf.reduce_sum(reshape(sin_phi), axis=-1)
-            cos_phi_sum = tf.reduce_sum(reshape(cos_phi), axis=-1)
-            phi_mean = tf.atan2(sin_phi_sum, cos_phi_sum)
-            
-            unmasked = tf.reduce_sum(tf.cast(reshape(~data_mask), 'float32'), axis=-1)
-            if len(vn.shape) == 2:
-                vn = tf.where(data_mask, 0., vn)
-                vn_mean = tf.reduce_sum(reshape(vn), axis=-1)/unmasked
-            else: 
-                vn_mean = vn
-            v_mean = tf.where(unmasked == 0., np.nan, phi_mean*vn_mean/np.pi)
-            
-            dealiased_vel = self.run_unet_vda(v_mean, vn_mean)
-            
-            self.data = []
-            for i in range(na):
-                vn_ref = vn[i::na] if len(vn.shape) == 2 else vn 
-                n = tf.round((dealiased_vel-data[i::na])/(2*vn_ref))
-                self.data += [data[i::na]+2*n*vn_ref]
-            self.data = tf.reshape(tf.concat([tf.expand_dims(arr, 1) for arr in self.data], axis=1), data.shape)
-        else:
-            self.data = []
-            for i in range(na):
-                self.data += [self.run_unet_vda(data[i::na], vn[i::na] if len(vn.shape) == 2 else vn)]
-            self.data = tf.reshape(tf.concat([tf.expand_dims(arr, 1) for arr in self.data], axis=1), data.shape)
-                
-        return self.data
-    
-    @tf.function
-    def run_unet_vda(self, vel, vn):
         ##  Prep data for UNet
         # shape (batch, n_frames, Naz, Nrng, 1)
         vel = vel[None, None, :, :, None]
         
         # Pad data 12 degrees on either side with periodic boundary conditions
         pad_deg = 12
-        vel = tf.concat((vel[:,:,-pad_deg:,:,:], vel, vel[:,:,:pad_deg,:,:]), axis=2)
-        if len(vn.shape) == 2:
+        vel = np.concatenate((vel[:,:,-pad_deg:,:,:], vel, vel[:,:,:pad_deg,:,:]), axis=2)
+        if type(vn) == np.ndarray:
+            # Assumes that the input shapes of vel and vn are equal
+            vn = np.concatenate([vn, np.full((n_azi, n_rad_extra), np.nan, dtype=vn.dtype)], axis=1)
             vn = vn[None, None, :, :, None]
-            vn = tf.concat((vn[:,:,-pad_deg:,:,:], vn, vn[:,:,:pad_deg,:,:]), axis=2)
+            vn = np.concatenate((vn[:,:,-pad_deg:,:,:], vn, vn[:,:,:pad_deg,:,:]), axis=2)
         else: 
             # Assumes that vn is a single number
             # shape (batch, n_frames, 1)
-            vn = tf.reshape(vn, (1,1,1))
+            vn = np.array([[[vn]]])
         
         # Run UNet
         inp = {'vel':vel, 'nyq':vn}
         out = self.vda(inp)
-        return out['dealiased_vel'][0,pad_deg:-pad_deg,:,0]
+        return out['dealiased_vel'].numpy()[0,pad_deg:-pad_deg,:n_rad,0]
