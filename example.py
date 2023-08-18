@@ -25,8 +25,11 @@ def angle_diff(angle1, angle2=None):
 
 #%%
 filenames = os.listdir('data')
-print(filenames)
-with open('data/'+filenames[0], 'rb') as f:
+# 1 represents velocity scan with 2 data gaps
+# 2 represents scan with use of 2 different Nyquist velocities
+# 3 represents scan that spans much more than 360 degrees
+# 4 represents scan with half of it missing
+with open('data/'+filenames[1], 'rb') as f:
     data, azis, vn = pickle.load(f).values()
 
 diffs = -angle_diff(azis[::-1])
@@ -44,7 +47,9 @@ data_new = vda(data, vn, azis, da)
 print(pytime.time()-t, '')
 
 
-#%%
+data = vda.expand_data_to_360deg(data, vn, azis, da)[0]
+data_new = vda.expand_data_to_360deg(data_new, vn, azis, da)[0]
+
 # Set Colormap
 cmap=cm.get_cmap('seismic')
 cmap.set_under([.9,.9,.9])
