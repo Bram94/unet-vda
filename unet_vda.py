@@ -9,9 +9,8 @@ if gpus:
     # for gpu in gpus:
         # tf.config.experimental.set_memory_growth(gpu, True)
     # Restrict TensorFlow to only allocate x GB of memory on the first GPU
-    tf.config.experimental.set_virtual_device_configuration(
-        gpus[0],
-        [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1536)]) # Notice here
+    tf.config.experimental.set_virtual_device_configuration(gpus[0],
+        [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024)])
 # tf.config.run_functions_eagerly(True)
 
 from src.dealias import VelocityDealiaser
@@ -80,20 +79,26 @@ class Unet_VDA():
             
         indices = np.s_[:]
         if not azis is None:
+            #Add rows with nans in case that data doesn't cover the full 360 degrees
             data, vn, indices = self.expand_data_to_360deg(data, vn, azis, da)
         
         vn_unique = np.unique(np.asarray(vn))
         vn = vn_unique[0] if len(vn_unique) == 1 else np.tile(vn, (data.shape[1], 1)).T
         
         orig_n_rad = data.shape[1]
-        data, vn = self.expand_radial_dim_if_needed(data, vn)
-        data, vn = self.change_azimuthal_dim_if_needed(data, vn)
+        # The number of radial bins needs to be an integer multiple of 64
+        data, vn = self.check_rad_dim(data, vn)
+        # The number of azimuthal bins needs to be an integer multiple of 360
+        data, vn = self.check_azi_dim(data, vn)
         
-        data = self.prepare_and_run_model(data, vn).numpy()
+        data = self.run_model(data, vn).numpy()
         
-        return self.restore_azimuthal_dim_if_needed(data, vn)[indices, :orig_n_rad]
+        return self.restore_azi_dim(data, vn)[indices, :orig_n_rad]
             
     def expand_data_to_360deg(self, data, vn, azis, da):
+        """Add rows of nans in case of data gaps. An array of indices is created that contains for each data row the row in which it appears
+        in the expanded data array. These indices are used to obtain back the original data array after dealiasing.
+        """
         n_azi, n_rad = data.shape
         
         _data, indices = [], []
@@ -121,10 +126,13 @@ class Unet_VDA():
         
         return _data, _vn, indices
     
-    def expand_radial_dim_if_needed(self, data, vn):
+    def check_rad_dim(self, data, vn):
+        """The number of radial bins needs to be an integer multiple of 64. Here the radial dimension is expanded if needed.
+        Also, a formerly used radial dimension can be reused when self.limit_shape_changes = True. This limits data shape variability,
+        which triggers recreation of computational graphs, an expensive operation.
+        """
         n_azi, n_rad = data.shape
         
-        # The number of radial bins needs to be an integer multiple of 64
         n = 64
         n_rad_extra = n-n_rad%n
         if self.limit_shape_changes and self.n_rads:
@@ -141,7 +149,10 @@ class Unet_VDA():
             vn = np.concatenate([vn, np.full((n_azi, n_rad_extra), np.nan, dtype=vn.dtype)], axis=1)
         return data, vn 
     
-    def change_azimuthal_dim_if_needed(self, data, vn):
+    def check_azi_dim(self, data, vn):
+        """Azimuthal dimension should be an integer multiple of 360. If not, then certain rows are either repeated or skipped, in order
+        to arrive at the desired dimension.
+        """
         n_azi = data.shape[0]
         self.remap_data = n_azi%360 != 0
         if self.remap_data:
@@ -154,7 +165,11 @@ class Unet_VDA():
                 vn = vn[self.remap_indices]
         return data, vn
                 
-    def restore_azimuthal_dim_if_needed(self, data, vn):   
+    def restore_azi_dim(self, data, vn):
+        """Restore original azimuthal dimension, now that velocity is dealiased. In the case that the number of rows had to be reduced to
+        arrive at the desired dimension, some data rows will not have been dealiased yet. For these a correction factor is obtained by
+        comparing the potentially aliased velocity with the average dealiased velocity in the neighbouring rows.
+        """
         if self.remap_data:
             copy = data
             data = np.empty((self.orig_n_azi, copy.shape[1]), copy.dtype)
@@ -168,15 +183,18 @@ class Unet_VDA():
         return data
     
     @tf.function
-    def prepare_and_run_model(self, data, vn):        
-        """Note: the model has been trained on data with an azimuthal resolution of 1°, implying that input data needs to consist
-        of 360 azimuthal bins. If the actual number is different, then measures are needed.
+    def run_model(self, data, vn):        
+        """The model has been trained on data with an azimuthal resolution of 1°, implying that input data needs to consist
+        of 360 azimuthal bins. Former steps have ensured that azimuthal dimension is integer multiple of 360. When this
+        integer multiple is 2 (or more), then the model can't be applied to the full dataset. In this case one can run it twice on
+        alternating rows (to get 1° seperation), or run it on a reduced dataset, with 2-row averaged (aliased) velocities.
+        The latter is more computationally efficient, and is the default (self.run_only_once_for_da_gt_1 = True).
         """
         n_azi, n_rad = data.shape        
         na = round(n_azi/360)
         
         if na == 1:
-            self.data = self.run_unet_vda(data, vn)
+            self.data = self.run_vda(data, vn)
         elif self.run_only_once_for_da_gt_1:    
             data_mask = tf.math.is_nan(data)
             
@@ -197,7 +215,7 @@ class Unet_VDA():
                 vn_mean = vn
             v_mean = tf.where(unmasked == 0., np.nan, phi_mean*vn_mean/np.pi)
             
-            dealiased_vel = self.run_unet_vda(v_mean, vn_mean)
+            dealiased_vel = self.run_vda(v_mean, vn_mean)
             
             self.data = []
             for i in range(na):
@@ -208,13 +226,13 @@ class Unet_VDA():
         else:
             self.data = []
             for i in range(na):
-                self.data += [self.run_unet_vda(data[i::na], vn[i::na] if len(vn.shape) == 2 else vn)]
+                self.data += [self.run_vda(data[i::na], vn[i::na] if len(vn.shape) == 2 else vn)]
             self.data = tf.reshape(tf.concat([tf.expand_dims(arr, 1) for arr in self.data], axis=1), data.shape)
                 
         return self.data
     
     @tf.function
-    def run_unet_vda(self, vel, vn):
+    def run_vda(self, vel, vn):
         ##  Prep data for UNet
         # shape (batch, n_frames, Naz, Nrng, 1)
         vel = vel[None, None, :, :, None]

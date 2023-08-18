@@ -47,6 +47,7 @@ data_new = vda(data, vn, azis, da)
 print(pytime.time()-t, '')
 
 
+#Quick-and-dirty way of positioning the data close to the actual azimuths. Only for a quick visualisation of results.
 data = vda.expand_data_to_360deg(data, vn, azis, da)[0]
 data_new = vda.expand_data_to_360deg(data_new, vn, azis, da)[0]
 
