@@ -1,5 +1,8 @@
 # Deep Learning-based Velocity Dealiaser for Weather Radar
 
+This repo is an expansion of the original repo. It mainly adds code for handling datasets of varying dimensions, and the use of more than 1 Nyquist velocity for a single radar scan. It also includes new sample data.
+
+Original description:
 This repo contains a pretrained model, sample code, and sample data for the paper ["A Deep Learning-based Velocity Dealiasing Algorithm Derived from the WSR-88D Open Radar Product Generator](https://arxiv.org/abs/2211.13181)"
 
 ![Alt text](data/result.jpg?raw=true "sample")
