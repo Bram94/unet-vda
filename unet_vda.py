@@ -93,6 +93,7 @@ class Unet_VDA():
         
         data = self.run_model(data, vn).numpy()
         
+        #restore number of azimuthal bins to value before calling self.check_azi_dim, and then remove any extra nan rows by using indices
         return self.restore_azi_dim(data, vn)[indices, :orig_n_rad]
             
     def expand_data_to_360deg(self, data, vn, azis, da):
@@ -188,7 +189,9 @@ class Unet_VDA():
         of 360 azimuthal bins. Former steps have ensured that azimuthal dimension is integer multiple of 360. When this
         integer multiple is 2 (or more), then the model can't be applied to the full dataset. In this case one can run it twice on
         alternating rows (to get 1° seperation), or run it on a reduced dataset, with 2-row averaged (aliased) velocities.
-        The latter is more computationally efficient, and is the default (self.run_only_once_for_da_gt_1 = True).
+        The latter is more computationally efficient, and is the default (self.run_only_once_for_da_gt_1 = True). In the latter
+        case correction factors for the actual data rows are obtained obtained by comparing their potentially aliased velocities
+        with the dealiased velocities from the model.
         """
         n_azi, n_rad = data.shape        
         na = round(n_azi/360)
@@ -198,6 +201,9 @@ class Unet_VDA():
         elif self.run_only_once_for_da_gt_1:    
             data_mask = tf.math.is_nan(data)
             
+            # Reduce azimuthal dimension to 360, by averaging neigbhouring data rows. This is not a normal average, since that leads
+            # to problems when averaging over both aliased and non-aliased velocities. The average is calculated by first converting
+            # velocities to phases, then calculating a circular mean phase, and then converting this phase back to a velocity.
             phi = np.pi*data/vn
             sin_phi = tf.where(data_mask, 0., tf.sin(phi))
             cos_phi = tf.where(data_mask, 0., tf.cos(phi))

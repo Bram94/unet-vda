@@ -29,22 +29,28 @@ filenames = os.listdir('data')
 # 2 represents scan with use of 2 different Nyquist velocities
 # 3 represents scan that spans much more than 360 degrees
 # 4 represents scan with half of it missing
+"""Each file contains velocity data, azimuth angles and Nyquist velocities for a single base elevation scan.
+These values have been obtained by using Py-ART code. Empty data bins or bins with incorrect values have been
+filled with nans.
+"""
 with open('data/'+filenames[1], 'rb') as f:
     data, azis, vn = pickle.load(f).values()
 
 diffs = -angle_diff(azis[::-1])
 csum = np.cumsum(diffs)
-# Ensure that azis spans less than 360°, to prevent issues with unsampled radials in self.map_onto_uniform_grid
+# If azis spans more than 360 degrees, then exclude excess of data rows. The procedure removes the first rows, since in
+# my experience an excess of rows means that something went wrong earlier during the scan (like large data gap).
 n_azi = len(azis) if csum[-1] < 360 else 1+np.where(csum >= 360)[0][0]
 data, azis, vn = data[-n_azi:], azis[-n_azi:], vn[-n_azi:]
 
 diffs = diffs[:n_azi-1][::-1]
 da_median = np.median(diffs)
+# Exclude large differences due to data gaps
 da = diffs[diffs < 3*da_median].mean()
 
 t = pytime.time()
 data_new = vda(data, vn, azis, da)
-print(pytime.time()-t, '')
+print(pytime.time()-t, 't')
 
 
 #Quick-and-dirty way of positioning the data close to the actual azimuths. Only for a quick visualisation of results.
