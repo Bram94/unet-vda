@@ -14,7 +14,7 @@ To run the code in the repo, install the following into your python environment
 
 ### Demo
 
-A demo showing how to load a pretrained model and apply it to some sample data can be found in the notebook `Unet-VDA-Demo.ipynb`
+A demo showing how to load a pretrained model and apply it to some sample data can be found in the script example.py.
 
 
 
