@@ -2,9 +2,11 @@
 # coding: utf-8
 
 import numpy as np
+import os
 import time as pytime
 import tensorflow as tf
 gpus = tf.config.experimental.list_physical_devices('GPU')
+print(gpus)
 if gpus:
     # for gpu in gpus:
         # tf.config.experimental.set_memory_growth(gpu, True)
@@ -26,7 +28,7 @@ def angle_diff(angle1, angle2=None, between_0_360=False):
 
 class Unet_VDA():
     def __init__(self):
-        self.run_only_once_for_da_gt_1 = True
+        self.run_only_once_for_na_gt_1 = True
         self.n_rads = []
         
     
@@ -82,7 +84,7 @@ class Unet_VDA():
             #Add rows with nans in case that data doesn't cover the full 360 degrees
             data, vn, indices = self.expand_data_to_360deg(data, vn, azis, da)
         
-        vn_unique = np.unique(np.asarray(vn))
+        vn_unique = np.unique(np.asarray(vn, dtype=data.dtype))
         vn = vn_unique[0] if len(vn_unique) == 1 else np.tile(vn, (data.shape[1], 1)).T
         
         orig_n_rad = data.shape[1]
@@ -189,7 +191,7 @@ class Unet_VDA():
         of 360 azimuthal bins. Former steps have ensured that azimuthal dimension is integer multiple of 360. When this
         integer multiple is 2 (or more), then the model can't be applied to the full dataset. In this case one can run it twice on
         alternating rows (to get 1° seperation), or run it on a reduced dataset, with 2-row averaged (aliased) velocities.
-        The latter is more computationally efficient, and is the default (self.run_only_once_for_da_gt_1 = True). In the latter
+        The latter is more computationally efficient, and is the default (self.run_only_once_for_na_gt_1 = True). In the latter
         case correction factors for the actual data rows are obtained obtained by comparing their potentially aliased velocities
         with the dealiased velocities from the model.
         """
@@ -198,7 +200,7 @@ class Unet_VDA():
         
         if na == 1:
             self.data = self.run_vda(data, vn)
-        elif self.run_only_once_for_da_gt_1:    
+        elif self.run_only_once_for_na_gt_1:    
             data_mask = tf.math.is_nan(data)
             
             # Reduce azimuthal dimension to 360, by averaging neigbhouring data rows. This is not a normal average, since that leads
